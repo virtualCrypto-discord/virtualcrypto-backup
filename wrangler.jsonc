@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "virtualcrypto-backup",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": {"enabled": false},
+  "r2_buckets": [{"binding":"BACKUPS","bucket_name":"virtualcrypto-backups"}],
+  "durable_objects": {"bindings":[{"name":"GATE","class_name":"BackupGate"}]},
+  "migrations": [{"tag":"v1","new_sqlite_classes":["BackupGate"]}],
+  "triggers": {"crons":["23 * * * *"]}
+}
