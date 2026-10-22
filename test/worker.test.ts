@@ -1,5 +1,5 @@
 import { env, runInDurableObject } from 'cloudflare:test';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import worker, { LIMITS } from '../src/index';
 const token = 'test-upload-token-'.repeat(4), statusToken = 'test-status-token-'.repeat(4);
 const bytes = new TextEncoder().encode('age-encryption.org/v1\nTEST-CIPHERTEXT');
@@ -80,5 +80,22 @@ describe('persistent capacity and read budgets', () => {
   await runInDurableObject(e.GATE.getByName(), async (_,state) => {
    const l=await state.storage.get('ledger');expect(l.entries).toHaveLength(0);expect(l.heads).toBe(1);
   });
+ });
+});
+
+it('sends at most one stale alert per UTC day, even after delivery failure', async () => {
+ const e=isolated();
+ await runInDurableObject(e.GATE.getByName(), async (instance,state) => {
+  instance.env.DISCORD_WEBHOOK_URL='https://example.invalid/notify';
+  await state.storage.put('ledger',{entries:[],day:'',attempts:0,lastSuccess:Date.now()-31*3600000});
+  const mocked=vi.spyOn(globalThis,'fetch').mockResolvedValue(new Response(null,{status:503}));
+  try {
+   await instance.fetch(new Request('https://internal/reconcile'));
+   await instance.fetch(new Request('https://internal/reconcile'));
+   expect(mocked).toHaveBeenCalledTimes(1);
+   const payload=JSON.parse(mocked.mock.calls[0][1].body);
+   expect(payload.allowed_mentions).toEqual({parse:[]});
+   expect(payload.content).toContain('30時間');
+  } finally { mocked.mockRestore(); }
  });
 });
