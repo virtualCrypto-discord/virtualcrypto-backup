@@ -1,12 +1,14 @@
-# virtualCrypto encrypted backups
+# virtualCrypto backup upload gate
 
-Daily PostgreSQL backups for virtualCrypto. This repository is public; only repository collaborators may create pull requests. GitHub Actions only runs tests and has no production secrets, private-network access, deployment credentials, or backup execution role. Deploy the backup image and Worker manually from a trusted workstation.
+This repository owns the independent Cloudflare Worker that admits encrypted backups and enforces storage/operation limits. It is public; only repository collaborators may create pull requests. Its GitHub Actions run tests without production credentials.
+
+The Fly runner, container image, and automated deployment belong to [virtualCrypto3/ops/backup](https://github.com/virtualCrypto-discord/virtualCrypto3/tree/main/ops/backup). The vc3 deployment can change future backups but has no authority to deploy this Worker, manage R2 retention, or retrieve the age private key. Migrate vc3 first, then merge this repository's cleanup; the existing scheduled Machine continues running throughout.
 
 ## Data path
 
 Scheduled Fly Machine → Fly-private PostgreSQL using a SELECT-only role → custom-format gzip PostgreSQL dump → age encryption → authenticated Cloudflare Worker → private R2 Standard bucket. The Machine runs once daily, exits when done, and does not restart on failure. There are no public listeners or dedicated public IPs. A 10-minute process timeout bounds each execution. Plaintext archives exist only in temporary storage during a run.
 
-The age **private key is never given to GitHub, Fly, or Cloudflare**. Preserve it in an independent secure location: losing it makes every backup unusable. The public recipient is embedded in `scripts/backup.py`. Encryption framing and checksum checks at ingress detect mistakes; they do not prove that an authorized sender supplied a valid backup. Restore testing remains necessary.
+The age **private key is never given to GitHub, Fly, or Cloudflare**. Preserve it in an independent secure location: losing it makes every backup unusable. The public recipient is embedded in vc3’s `ops/backup/scripts/backup.py`. Encryption framing and checksum checks at ingress detect mistakes; they do not prove that an authorized sender supplied a valid backup. Restore testing remains necessary.
 
 ## Limits and cost
 
@@ -24,14 +26,9 @@ Pricing: https://developers.cloudflare.com/r2/pricing/
 
 ## Credentials
 
-Fly backup app secrets only:
+The Worker has `UPLOAD_TOKEN`, `STATUS_TOKEN`, and `DISCORD_WEBHOOK_URL` secrets. The status token is kept locally for freshness checks. Fly holds its own upload token and database credentials, managed by vc3; this repository does not deploy the Fly app.
 
-- `PGPASSWORD`: dedicated SELECT-only database role, default read-only transactions and a statement timeout. Future objects owned by `web` receive SELECT through default privileges. New object owners require a privilege update.
-- `UPLOAD_TOKEN`: upload endpoint only, no read/delete access.
-
-Fly also stores `DISCORD_WEBHOOK_URL` for immediate failure alerts. Worker secrets: `UPLOAD_TOKEN`, `STATUS_TOKEN` (different random values), and `DISCORD_WEBHOOK_URL`. The status token is kept locally for freshness checks. The Worker R2 binding is broader than the exposed upload API; the 30-day bucket lock is an independent deletion safeguard. Expiry uses R2 lifecycle, so no deletion token is distributed.
-
-GitHub receives **none** of these credentials. No Cloudflare administration token, direct R2 key, Fly administration token, database password, WireGuard private key, or age private key belongs in Actions.
+The Worker R2 binding is broader than the exposed upload API; the 30-day bucket lock is an independent deletion safeguard. Expiry uses R2 lifecycle, so no deletion token is distributed. Worker and R2 management credentials must not be placed in vc3 Actions or the Fly app. GitHub Actions in this repository receives no deployment credentials either; Worker updates currently run from a trusted workstation. The DB disclosure risk through vc3 deployment is accepted; the independent gate protects retained backups and bounds submissions from a compromised runner.
 
 ## Operations
 
@@ -43,12 +40,12 @@ GitHub receives **none** of these credentials. No Cloudflare administration toke
 
 ## Development and deployment
 
-Node.js 24: `npm ci && npm run check`. Python scripts use the standard library; the backup image includes PostgreSQL client tools and age. The PostgreSQL 18.6 image and Actions are pinned by digest/commit.
+Node.js 24: `npm ci && npm run check`. The local status helper uses the Python standard library. The Fly image and its deployment are maintained in vc3.
 
-Deploy locally with `npx wrangler deploy`, then populate both secrets with `npx wrangler secret bulk` using a protected local input file. R2 bucket, retention lock, and lifecycle are provisioned separately and must be verified before enabling the schedule. Do not enable public bucket access.
+Deploy locally with `npx wrangler deploy`, then populate the secrets with `npx wrangler secret bulk` using a protected local input file. R2 bucket, retention lock, and lifecycle are provisioned separately and must be verified before enabling the schedule. Do not enable public bucket access.
 
 ## Deployed configuration and verification
 
-`deploy/machine.json` records the pinned image and non-secret daily Machine configuration. Apply only from a trusted workstation with Fly credentials; GitHub must never deploy it. Secrets are staged separately in the Fly app. The root filesystem is capped at 2 GB, so its stopped-storage charge is approximately $0.30/month before any allowances; short daily runtime and outbound traffic add a small amount. This is additional to R2 pricing.
+The Fly Machine configuration and deployment instructions have moved to vc3. Moving the code does not recreate the Machine, reset the Worker ledger, rotate the age recipient, or alter existing R2 objects or retention settings.
 
 Initial end-to-end verification (2026-10-22 UTC): a 9,122,914-byte age-encrypted archive was created inside Fly, uploaded to R2, downloaded locally, checked against its SHA-256 receipt, decrypted, and restored into an isolated PostgreSQL 18 container. All 28 public tables restored; payment history 496,289 rows, users 32,655 rows, assets 44,577 rows. The temporary restore container, volume, and decrypted restore archive were removed. Worker admission, read-budget, and notification suppression tests pass. Discord delivery failures are bounded and logged; automated retry storms are deliberately avoided.

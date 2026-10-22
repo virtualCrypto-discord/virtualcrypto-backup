@@ -1,5 +1,0 @@
-*
-!Dockerfile
-!scripts/
-scripts/*
-!scripts/backup.py
