@@ -2,22 +2,25 @@ import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, it, expect, vi } from 'vitest';
 import worker, { LIMITS } from '../src/index';
 const token = 'test-upload-token-'.repeat(4), statusToken = 'test-status-token-'.repeat(4);
+const fingerprint = 'a'.repeat(64);
+const tls = {certPresented:'1',certVerified:'SUCCESS',certRevoked:'0',certFingerprintSHA256:fingerprint};
+const mtlsRequest = (url, init = {}) => new Request(url, {...init,cf:{tlsClientAuth:tls}});
 const bytes = new TextEncoder().encode('age-encryption.org/v1\nTEST-CIPHERTEXT');
 async function request(id = crypto.randomUUID(), body = bytes, extra = {}) {
  const digest = await crypto.subtle.digest('SHA-256', body);
  const sha = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2,'0')).join('');
- return new Request('https://backup.test/upload', {method:'POST',body,headers:{authorization:`Bearer ${token}`,'content-type':'application/octet-stream','content-length':String(body.length),'x-backup-id':id,'x-backup-sha256':sha,...extra}});
+ return mtlsRequest('https://backup.test/upload', {method:'POST',body,headers:{'content-type':'application/octet-stream','content-length':String(body.length),'x-backup-id':id,'x-backup-sha256':sha,...extra}});
 }
 function isolated() {
  const gate = env.GATE.get(env.GATE.newUniqueId());
- return {...env,UPLOAD_TOKEN:token,STATUS_TOKEN:statusToken,GATE:{getByName:()=>gate}};
+ return {...env,MTLS_HOST:'backup.test',CLIENT_CERT_SHA256:fingerprint,STATUS_TOKEN:statusToken,GATE:{getByName:()=>gate}};
 }
 describe('backup admission', () => {
  it('rejects unauthenticated requests and does not expose read/delete/reconcile', async()=>{
   const e=isolated();
-  expect((await worker.fetch(new Request('https://x/upload',{method:'POST'}),e)).status).toBe(401);
+  expect((await worker.fetch(new Request('https://backup.test/upload',{method:'POST'}),e)).status).toBe(403);
   for(const path of ['/reconcile','/delete','/objects/a']) expect((await worker.fetch(new Request(`https://x${path}`,{method:'POST'}),e)).status).toBe(404);
-  expect((await worker.fetch(new Request('https://x/status',{headers:{authorization:`Bearer ${token}`}}),e)).status).toBe(401);
+  expect((await worker.fetch(mtlsRequest('https://backup.test/status',{headers:{authorization:`Bearer ${token}`}}),e)).status).toBe(401);
  });
  it('stores exact ciphertext once; a retry returns a receipt without rewriting', async()=>{
   const e=isolated(), id=crypto.randomUUID();
@@ -25,7 +28,7 @@ describe('backup admission', () => {
   const receipt=await first.json();
   const stored=await env.BACKUPS.get(receipt.key);expect(new Uint8Array(await stored.arrayBuffer())).toEqual(bytes);
   const second=await worker.fetch(await request(id),e);expect(second.status).toBe(200);expect((await second.json()).duplicate).toBe(true);
-  const status=await worker.fetch(new Request('https://x/status',{headers:{authorization:`Bearer ${statusToken}`}}),e);
+  const status=await worker.fetch(mtlsRequest('https://backup.test/status',{headers:{authorization:`Bearer ${statusToken}`}}),e);
   expect((await status.json()).reserved_bytes).toBe(bytes.length);
  });
  it('rejects oversize before storing and fails closed on a dishonest body length',async()=>{
@@ -46,7 +49,7 @@ describe('backup admission', () => {
   const results=await Promise.all(requests.map(r=>worker.fetch(r,e)));
   expect(results.filter(r=>r.status===201).length).toBeLessThanOrEqual(3);
   expect(results.every(r=>[201,409,429].includes(r.status))).toBe(true);
-  const s=await worker.fetch(new Request('https://x/status',{headers:{authorization:`Bearer ${statusToken}`}}),e);
+  const s=await worker.fetch(mtlsRequest('https://backup.test/status',{headers:{authorization:`Bearer ${statusToken}`}}),e);
   expect((await s.json()).reserved_bytes).toBeLessThanOrEqual(bytes.length*3);
  });
 });
@@ -97,5 +100,24 @@ it('sends at most one stale alert per UTC day, even after delivery failure', asy
    expect(payload.allowed_mentions).toEqual({parse:[]});
    expect(payload.content).toContain('30時間');
   } finally { mocked.mockRestore(); }
+ });
+});
+
+describe('mTLS authorization', () => {
+ it('rejects absent, invalid, revoked, or unpinned certificates before accessing the gate', async () => {
+  const gate = vi.fn(() => { throw new Error('Unauthenticated access reached gate'); });
+  const e={...isolated(),GATE:{getByName:gate}};
+  for (const cert of [undefined, {...tls,certPresented:'0'}, {...tls,certVerified:'FAILED:certificate has expired'}, {...tls,certRevoked:'1'}, {...tls,certFingerprintSHA256:'b'.repeat(64)}]) {
+   const req=new Request('https://backup.test/upload',{method:'POST',cf:{tlsClientAuth:cert},headers:{authorization:`Bearer ${token}`,'Cf-Client-Cert-Sha256':fingerprint}});
+   expect((await worker.fetch(req,e)).status).toBe(403);
+  }
+  expect((await worker.fetch(mtlsRequest('https://old.workers.dev/upload',{method:'POST'}),e)).status).toBe(403);
+  expect(gate).not.toHaveBeenCalled();
+ });
+ it('requires mTLS for status too and retains its separate authorization', async () => {
+  const e=isolated();
+  expect((await worker.fetch(new Request('https://backup.test/status',{headers:{authorization:`Bearer ${statusToken}`}}),e)).status).toBe(403);
+  expect((await worker.fetch(mtlsRequest('https://backup.test/status'),e)).status).toBe(401);
+  expect((await worker.fetch(mtlsRequest('https://backup.test/status',{headers:{authorization:`Bearer ${statusToken}`}}),e)).status).toBe(200);
  });
 });
