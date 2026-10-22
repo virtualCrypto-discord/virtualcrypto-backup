@@ -26,7 +26,7 @@ Pricing: https://developers.cloudflare.com/r2/pricing/
 
 ## Credentials
 
-The Worker has `UPLOAD_TOKEN`, `STATUS_TOKEN`, and `DISCORD_WEBHOOK_URL` secrets. The status token is kept locally for freshness checks. Fly holds its own upload token and database credentials, managed by vc3; this repository does not deploy the Fly app.
+The Worker has `STATUS_TOKEN` and `DISCORD_WEBHOOK_URL` secrets. Upload authentication uses mTLS; no upload bearer token is accepted. The status token is kept locally for freshness checks. Fly holds its mTLS certificate/private key and database credentials, managed by vc3; this repository does not deploy the Fly app.
 
 The Worker R2 binding is broader than the exposed upload API; the 30-day bucket lock is an independent deletion safeguard. Expiry uses R2 lifecycle, so no deletion token is distributed. Worker and R2 management credentials must not be placed in vc3 Actions or the Fly app. GitHub Actions in this repository receives no deployment credentials either; Worker updates currently run from a trusted workstation. The DB disclosure risk through vc3 deployment is accepted; the independent gate protects retained backups and bounds submissions from a compromised runner.
 
@@ -36,7 +36,7 @@ The Worker R2 binding is broader than the exposed upload API; the 30-day bucket 
 - `scripts/status.py` checks freshness with the locally held status token and fails after 30 hours without a successful upload. Fly sends a Discord notification if the job fails. Worker checks hourly and sends a stale/capacity alert at most once per UTC day. Discord outages are logged without unbounded retries. The Worker supplies independent monitoring if the Fly job never starts.
 - If full, investigate failed uploads or lifecycle configuration. Do not clear the ledger while objects exist. Keep the singleton name `production-v1` and its durable state across deployments. Changing it would reset accounting.
 - Restore credentials are held separately from the upload job. Use read-only access to retrieve the receipt's object, decrypt locally with `age -d -i /safe/identity.txt -o backup.dump backup.dump.age`, and restore into an isolated PostgreSQL 18 database using `pg_restore --no-owner --no-acl --exit-on-error`. Never overwrite production as a restore test. Check schema, constraints, table counts, and business data before using a restored database.
-- Rotate the Fly-only DB password if the backup environment is compromised. Rotate the upload token separately. Retention protects old objects, but compromised upload credentials can exhaust the daily quota or submit invalid backups.
+- Rotate the Fly-only DB password if the backup environment is compromised. Rotate/revoke the mTLS client certificate separately. Retention protects old objects, but compromised upload credentials can exhaust the daily quota or submit invalid backups.
 
 ## Development and deployment
 
@@ -49,3 +49,13 @@ Deploy locally with `npx wrangler deploy`, then populate the secrets with `npx w
 The Fly Machine configuration and deployment instructions have moved to vc3. Moving the code does not recreate the Machine, reset the Worker ledger, rotate the age recipient, or alter existing R2 objects or retention settings.
 
 Initial end-to-end verification (2026-10-22 UTC): a 9,122,914-byte age-encrypted archive was created inside Fly, uploaded to R2, downloaded locally, checked against its SHA-256 receipt, decrypted, and restored into an isolated PostgreSQL 18 container. All 28 public tables restored; payment history 496,289 rows, users 32,655 rows, assets 44,577 rows. The temporary restore container, volume, and decrypted restore archive were removed. Worker admission, read-budget, and notification suppression tests pass. Discord delivery failures are bounded and logged; automated retry storms are deliberately avoided.
+
+## Inbound mTLS
+
+The only public entry point is `https://vc-backup.tignear.com`. Enable Cloudflare-managed client-certificate authentication for the hostname in the zone's SSL/TLS Client Certificates settings. Keep the existing `webhook-emitter` hostname association when editing that list. `workers.dev` and preview URLs are disabled.
+
+Every exposed endpoint requires edge-provided `request.cf.tlsClientAuth`: certificate presented, verification `SUCCESS`, not revoked, and an explicitly allowed SHA-256 certificate fingerprint. HTTP headers cannot supply that identity. `CLIENT_CERT_SHA256` is a comma-separated allowlist for overlapping certificate rotation; fingerprints are public identifiers, not secrets. `MTLS_HOST` also restricts requests to the intended hostname. Missing metadata/configuration fails closed before the Durable Object or R2 is accessed.
+
+`/upload` needs the allowed certificate. `/status` additionally requires the separate status bearer token so the runner certificate alone does not grant status access. The local helper accepts `MTLS_CLIENT_CERT_FILE`, `MTLS_CLIENT_KEY_FILE`, `STATUS_TOKEN`, and `BACKUP_URL`.
+
+The client private key is generated locally and registered only as a Fly secret, never in GitHub. Fly deployment compromise can still extract it; mTLS does not change the accepted vc3 compromise boundary. Certificate management and this allowlist remain independent of vc3 deployment. Before certificate expiry, issue a replacement, add its fingerprint here, update Fly, verify an upload, and remove/revoke the old certificate. The current client certificate expires on 2041-10-18 UTC.

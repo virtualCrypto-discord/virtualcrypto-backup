@@ -1,7 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 
 export const LIMITS = { object: 32 * 1024 * 1024, stored: 1024 * 1024 * 1024, daily: 3, timeoutMs: 120_000, retentionDays: 36, headsDaily: 128, entries: 256 };
-interface Env { BACKUPS: R2Bucket; GATE: DurableObjectNamespace<BackupGate>; UPLOAD_TOKEN: string; STATUS_TOKEN: string; DISCORD_WEBHOOK_URL?: string }
+interface Env { BACKUPS: R2Bucket; GATE: DurableObjectNamespace<BackupGate>; MTLS_HOST: string; CLIENT_CERT_SHA256: string; STATUS_TOKEN: string; DISCORD_WEBHOOK_URL?: string }
 interface Entry { id: string; key: string; bytes: number; sha256: string; at: number; status: 'pending' | 'complete' | 'failed'; checkedAt?: number }
 interface Ledger { entries: Entry[]; day: string; attempts: number; lastSuccess: number | null; headDay?: string; heads?: number; monitoringSince?: number; alertDay?: string }
 const json = (value: unknown, status = 200) => Response.json(value, { status, headers: { 'Cache-Control': 'no-store' } });
@@ -16,12 +16,24 @@ async function authorized(request: Request, secret: string): Promise<boolean> {
   for (let i = 0; i < x.length; i++) difference |= x[i] ^ y[i];
   return difference === 0;
 }
+function authenticatedClient(request: Request, env: Env): boolean {
+  if (new URL(request.url).hostname !== env.MTLS_HOST) return false;
+  const tls = request.cf?.tlsClientAuth as { certPresented?: string; certVerified?: string; certRevoked?: string; certFingerprintSHA256?: string } | undefined;
+  if (tls?.certPresented !== '1' || tls.certVerified !== 'SUCCESS' || tls.certRevoked !== '0') return false;
+  const fingerprint = tls.certFingerprintSHA256?.toLowerCase();
+  if (!fingerprint || !/^[a-f0-9]{64}$/.test(fingerprint)) return false;
+  // Multiple pins allow overlap during certificate rotation. Only edge-provided
+  // TLS metadata is trusted; forwarded certificate headers are never consulted.
+  return (env.CLIENT_CERT_SHA256 ?? '').split(',').map(x => x.trim().toLowerCase())
+    .some(pin => /^[a-f0-9]{64}$/.test(pin) && pin === fingerprint);
+}
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const path = new URL(request.url).pathname;
     if (path === '/upload' && request.method === 'POST') {
-      if (!await authorized(request, env.UPLOAD_TOKEN)) return json({ error: 'unauthorized' }, 401);
+      if (!authenticatedClient(request, env)) return json({ error: 'client_certificate_required' }, 403);
     } else if (path === '/status' && request.method === 'GET') {
+      if (!authenticatedClient(request, env)) return json({ error: 'client_certificate_required' }, 403);
       if (!await authorized(request, env.STATUS_TOKEN)) return json({ error: 'unauthorized' }, 401);
     } else return json({ error: 'not_found' }, 404);
     return env.GATE.getByName('production-v1').fetch(request);

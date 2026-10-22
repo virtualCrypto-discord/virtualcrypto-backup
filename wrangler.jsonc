@@ -3,11 +3,46 @@
   "name": "virtualcrypto-backup",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
-  "workers_dev": true,
+  "workers_dev": false,
   "preview_urls": false,
-  "observability": {"enabled": false},
-  "r2_buckets": [{"binding":"BACKUPS","bucket_name":"virtualcrypto-backups"}],
-  "durable_objects": {"bindings":[{"name":"GATE","class_name":"BackupGate"}]},
-  "migrations": [{"tag":"v1","new_sqlite_classes":["BackupGate"]}],
-  "triggers": {"crons":["23 * * * *"]}
+  "observability": {
+    "enabled": false
+  },
+  "r2_buckets": [
+    {
+      "binding": "BACKUPS",
+      "bucket_name": "virtualcrypto-backups"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "GATE",
+        "class_name": "BackupGate"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "BackupGate"
+      ]
+    }
+  ],
+  "triggers": {
+    "crons": [
+      "23 * * * *"
+    ]
+  },
+  "routes": [
+    {
+      "pattern": "vc-backup.tignear.com",
+      "custom_domain": true
+    }
+  ],
+  "vars": {
+    "MTLS_HOST": "vc-backup.tignear.com",
+    "CLIENT_CERT_SHA256": "b71b904fef43b1446ad97b23fba5b1c66385051a4419977a8954433eda7e6e45"
+  }
 }
