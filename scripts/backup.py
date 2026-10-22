@@ -11,6 +11,7 @@ import urllib.error
 import urllib.request
 import uuid
 import resource
+import signal
 
 MAX_BYTES = 32 * 1024 * 1024
 RECIPIENT = 'age1zc8k5aqm3qwv42l3r29kfuraxtm68yesfxw2swlhufskk6mkg4ms0tr8ht'
@@ -47,6 +48,7 @@ def main():
             request = urllib.request.Request(url + '/upload', data=body, method='POST', headers={
                 'Authorization': 'Bearer ' + os.environ['UPLOAD_TOKEN'],
                 'Content-Type': 'application/octet-stream',
+                'User-Agent': 'virtualcrypto-backup/1.0',
                 'X-Backup-Id': backup_id, 'X-Backup-Sha256': digest,
             })
             try:
@@ -64,5 +66,25 @@ def main():
                 time.sleep(10)
 
 
+def notify_failure():
+    webhook = os.environ.get('DISCORD_WEBHOOK_URL')
+    if not webhook:
+        return
+    payload = json.dumps({'content': 'virtualCrypto: 定期バックアップが失敗しました。Fly の virtualcrypto-backup のログを確認してください。', 'allowed_mentions': {'parse': []}}).encode()
+    request = urllib.request.Request(webhook, data=payload, headers={'Content-Type': 'application/json', 'User-Agent': 'virtualcrypto-backup/1.0'})
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            response.read(1024)
+    except Exception:
+        print('Backup failure notification could not be delivered', flush=True)
+
+
 if __name__ == '__main__':
-    main()
+    def interrupted(_signum, _frame):
+        raise RuntimeError('Backup process timed out or was terminated')
+    signal.signal(signal.SIGTERM, interrupted)
+    try:
+        main()
+    except Exception:
+        notify_failure()
+        raise

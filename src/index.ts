@@ -1,9 +1,9 @@
 import { DurableObject } from 'cloudflare:workers';
 
 export const LIMITS = { object: 32 * 1024 * 1024, stored: 1024 * 1024 * 1024, daily: 3, timeoutMs: 120_000, retentionDays: 36, headsDaily: 128, entries: 256 };
-interface Env { BACKUPS: R2Bucket; GATE: DurableObjectNamespace<BackupGate>; UPLOAD_TOKEN: string; STATUS_TOKEN: string }
+interface Env { BACKUPS: R2Bucket; GATE: DurableObjectNamespace<BackupGate>; UPLOAD_TOKEN: string; STATUS_TOKEN: string; DISCORD_WEBHOOK_URL?: string }
 interface Entry { id: string; key: string; bytes: number; sha256: string; at: number; status: 'pending' | 'complete' | 'failed'; checkedAt?: number }
-interface Ledger { entries: Entry[]; day: string; attempts: number; lastSuccess: number | null; headDay?: string; heads?: number }
+interface Ledger { entries: Entry[]; day: string; attempts: number; lastSuccess: number | null; headDay?: string; heads?: number; monitoringSince?: number; alertDay?: string }
 const json = (value: unknown, status = 200) => Response.json(value, { status, headers: { 'Cache-Control': 'no-store' } });
 async function authorized(request: Request, secret: string): Promise<boolean> {
   if (!secret || secret.length < 32) return false;
@@ -138,6 +138,34 @@ export class BackupGate extends DurableObject<Env> {
       current.entries = current.entries.filter(e => !gone.has(e.key));
       await tx.put('ledger', current);
     });
+    await this.notifyStale();
     return json({ released: gone.size });
   }
+  private async notifyStale(): Promise<void> {
+    if (!this.env.DISCORD_WEBHOOK_URL) return;
+    const now = Date.now(), day = new Date(now).toISOString().slice(0, 10);
+    const reason = await this.ctx.storage.transaction(async tx => {
+      const ledger = await tx.get<Ledger>('ledger') ?? this.empty();
+      ledger.monitoringSince ??= now;
+      const stale = now - (ledger.lastSuccess ?? ledger.monitoringSince) > 30 * 3600_000;
+      const full = ledger.entries.reduce((n, e) => n + e.bytes, 0) + LIMITS.object > LIMITS.stored || ledger.entries.length >= LIMITS.entries;
+      const reason = stale ? '30時間以上バックアップの成功を確認できません。' : full ? '保存容量の上限に近づき、新規バックアップが停止する可能性があります。' : null;
+      const send = reason && day > (ledger.alertDay ?? '');
+      if (send) ledger.alertDay = day;
+      await tx.put('ledger', ledger);
+      return send ? reason : null;
+    });
+    if (reason) {
+      try {
+        const response = await fetch(this.env.DISCORD_WEBHOOK_URL, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: `virtualCrypto: ${reason} Fly の virtualcrypto-backup を確認してください。`, allowed_mentions: { parse: [] } }),
+          signal: AbortSignal.timeout(5000)
+        });
+        if (!response.ok) console.error('Backup notification failed:', response.status);
+        await response.body?.cancel();
+      } catch { console.error('Backup notification delivery failed'); }
+    }
+  }
+
 }

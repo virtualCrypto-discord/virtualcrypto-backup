@@ -29,14 +29,14 @@ Fly backup app secrets only:
 - `PGPASSWORD`: dedicated SELECT-only database role, default read-only transactions and a statement timeout. Future objects owned by `web` receive SELECT through default privileges. New object owners require a privilege update.
 - `UPLOAD_TOKEN`: upload endpoint only, no read/delete access.
 
-Worker secrets: `UPLOAD_TOKEN`, `STATUS_TOKEN` (different random values). The status token is kept locally for freshness checks. The Worker R2 binding is broader than the exposed upload API; the 30-day bucket lock is an independent deletion safeguard. Expiry uses R2 lifecycle, so no deletion token is distributed.
+Fly also stores `DISCORD_WEBHOOK_URL` for immediate failure alerts. Worker secrets: `UPLOAD_TOKEN`, `STATUS_TOKEN` (different random values), and `DISCORD_WEBHOOK_URL`. The status token is kept locally for freshness checks. The Worker R2 binding is broader than the exposed upload API; the 30-day bucket lock is an independent deletion safeguard. Expiry uses R2 lifecycle, so no deletion token is distributed.
 
 GitHub receives **none** of these credentials. No Cloudflare administration token, direct R2 key, Fly administration token, database password, WireGuard private key, or age private key belongs in Actions.
 
 ## Operations
 
 - Fly daily scheduling is approximate, not an exact wall-clock time. Inspect Machine exit status and backup freshness; schedule failures need operator intervention.
-- `scripts/status.py` checks freshness with the locally held status token and fails after 30 hours without a successful upload. Automatic external notification is not yet configured.
+- `scripts/status.py` checks freshness with the locally held status token and fails after 30 hours without a successful upload. Fly sends a Discord notification if the job fails. Worker checks hourly and sends a stale/capacity alert at most once per UTC day. Discord outages are logged without unbounded retries. The Worker supplies independent monitoring if the Fly job never starts.
 - If full, investigate failed uploads or lifecycle configuration. Do not clear the ledger while objects exist. Keep the singleton name `production-v1` and its durable state across deployments. Changing it would reset accounting.
 - Restore credentials are held separately from the upload job. Use read-only access to retrieve the receipt's object, decrypt locally with `age -d -i /safe/identity.txt -o backup.dump backup.dump.age`, and restore into an isolated PostgreSQL 18 database using `pg_restore --no-owner --no-acl --exit-on-error`. Never overwrite production as a restore test. Check schema, constraints, table counts, and business data before using a restored database.
 - Rotate the Fly-only DB password if the backup environment is compromised. Rotate the upload token separately. Retention protects old objects, but compromised upload credentials can exhaust the daily quota or submit invalid backups.
