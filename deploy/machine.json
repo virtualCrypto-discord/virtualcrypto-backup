@@ -1,0 +1,24 @@
+{
+  "image": "registry.fly.io/virtualcrypto-backup:fly-only@sha256:ee5c63fb399e46771233c513863db7288bff38315819bea3cf891111f908f030",
+  "env": {
+    "BACKUP_URL": "https://virtualcrypto-backup.tignear.workers.dev",
+    "PGCONNECT_TIMEOUT": "15",
+    "PGDATABASE": "virtualCrypto",
+    "PGHOST": "virtualcrypto-db-prod-pg18.flycast",
+    "PGPORT": "5432",
+    "PGUSER": "vc_backup_fly"
+  },
+  "guest": {
+    "cpu_kind": "shared",
+    "cpus": 1,
+    "memory_mb": 256
+  },
+  "restart": {
+    "policy": "no"
+  },
+  "schedule": "daily",
+  "rootfs": {
+    "persist": "never",
+    "size_gb": 2
+  }
+}

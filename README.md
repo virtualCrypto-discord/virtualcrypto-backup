@@ -46,3 +46,9 @@ GitHub receives **none** of these credentials. No Cloudflare administration toke
 Node.js 24: `npm ci && npm run check`. Python scripts use the standard library; the backup image includes PostgreSQL client tools and age. The PostgreSQL 18.6 image and Actions are pinned by digest/commit.
 
 Deploy locally with `npx wrangler deploy`, then populate both secrets with `npx wrangler secret bulk` using a protected local input file. R2 bucket, retention lock, and lifecycle are provisioned separately and must be verified before enabling the schedule. Do not enable public bucket access.
+
+## Deployed configuration and verification
+
+`deploy/machine.json` records the pinned image and non-secret daily Machine configuration. Apply only from a trusted workstation with Fly credentials; GitHub must never deploy it. Secrets are staged separately in the Fly app. The root filesystem is capped at 2 GB, so its stopped-storage charge is approximately $0.30/month before any allowances; short daily runtime and outbound traffic add a small amount. This is additional to R2 pricing.
+
+Initial end-to-end verification (2026-10-22 UTC): a 9,122,914-byte age-encrypted archive was created inside Fly, uploaded to R2, downloaded locally, checked against its SHA-256 receipt, decrypted, and restored into an isolated PostgreSQL 18 container. All 28 public tables restored; payment history 496,289 rows, users 32,655 rows, assets 44,577 rows. The temporary restore container, volume, and decrypted restore archive were removed. Worker admission, read-budget, and notification suppression tests pass. Discord delivery failures are bounded and logged; automated retry storms are deliberately avoided.
